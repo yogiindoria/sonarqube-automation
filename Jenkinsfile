@@ -16,7 +16,7 @@ pipeline {
                     credentialsId: 'aws-terraform'
                 ]]) {
                     dir('terraform') {
-                        sh 'terraform init'
+                        sh 'terraform init -migrate-state -input=false'
                     }
                 }
             }
