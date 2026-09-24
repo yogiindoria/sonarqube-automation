@@ -63,13 +63,18 @@ pipeline {
 
         stage('SonarQube URL') {
             steps {
-                script {
-                    def publicIp = sh(
-                        script: 'cd terraform && terraform output -raw sonarqube_public_ip',
-                        returnStdout: true
-                    ).trim()
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-terraform'
+                ]]) {
+                    script {
+                        def publicIp = sh(
+                            script: 'cd terraform && terraform output -raw sonarqube_public_ip',
+                            returnStdout: true
+                        ).trim()
 
-                    echo "SonarQube URL: http://${publicIp}:9000"
+                        echo "SonarQube URL: http://${publicIp}:9000"
+                    }
                 }
             }
         }
