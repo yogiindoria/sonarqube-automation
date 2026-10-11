@@ -16,7 +16,7 @@ pipeline {
                     credentialsId: 'aws-terraform'
                 ]]) {
                     dir('terraform') {
-                        sh 'terraform init -migrate-state -force-copy -input=false'
+                        sh 'terraform init -input=false'
                     }
                 }
             }
@@ -48,35 +48,35 @@ pipeline {
             }
         }
 
-        stage('Terraform Apply') {
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform'
-                ]]) {
-                    dir('terraform') {
-                        sh 'terraform apply -auto-approve'
-                    }
-                }
-            }
-        }
+        // stage('Terraform Apply') {
+        //     steps {
+        //         withCredentials([[
+        //             $class: 'AmazonWebServicesCredentialsBinding',
+        //             credentialsId: 'aws-terraform'
+        //         ]]) {
+        //             dir('terraform') {
+        //                 sh 'terraform apply -auto-approve'
+        //             }
+        //         }
+        //     }
+        // }
 
-        stage('SonarQube URL') {
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform'
-                ]]) {
-                    script {
-                        def publicIp = sh(
-                            script: 'cd terraform && terraform output -raw sonarqube_public_ip',
-                            returnStdout: true
-                        ).trim()
+        // stage('SonarQube URL') {
+        //     steps {
+        //         withCredentials([[
+        //             $class: 'AmazonWebServicesCredentialsBinding',
+        //             credentialsId: 'aws-terraform'
+        //         ]]) {
+        //             script {
+        //                 def publicIp = sh(
+        //                     script: 'cd terraform && terraform output -raw sonarqube_public_ip',
+        //                     returnStdout: true
+        //                 ).trim()
 
-                        echo "SonarQube URL: http://${publicIp}:9000"
-                    }
-                }
-            }
-        }
+        //                 echo "SonarQube URL: http://${publicIp}:9000"
+        //             }
+        //         }
+        //     }
+        // }
     }
 }
