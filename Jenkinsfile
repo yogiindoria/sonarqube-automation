@@ -35,6 +35,20 @@ pipeline {
             }
         }
 
+        stage('Inspect Terraform State') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-terraform'
+                ]]) {
+                    dir('terraform') {
+                        sh 'terraform workspace show'
+                        sh 'terraform state list'
+                    }
+                }
+            }
+        }
+
         stage('Terraform Plan') {
             steps {
                 withCredentials([[
@@ -78,5 +92,8 @@ pipeline {
         //         }
         //     }
         // }
+
+
+
     }
 }
