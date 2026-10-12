@@ -56,7 +56,7 @@ pipeline {
                     credentialsId: 'aws-terraform'
                 ]]) {
                     dir('terraform') {
-                        sh 'terraform plan'
+                        sh 'terraform plan -input=false -var="allowed_ssh_cidr=103.226.200.68/32"'
                     }
                 }
             }
