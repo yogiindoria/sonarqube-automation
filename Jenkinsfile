@@ -90,11 +90,14 @@ pipeline {
                           --graph
 
                         echo "===== Discovering Bastion Public IP ====="
+                        
                         BASTION_IP=$(aws ec2 describe-instances \
-                          --filters "Name=tag:Name,Values=sonarqube-bastion" \
+                        --region ap-south-1 \
+                        --filters "Name=tag:Name,Values=sonarqube-bastion" \
                                     "Name=instance-state-name,Values=running" \
-                          --query 'Reservations[0].Instances[0].PublicIpAddress' \
-                          --output text)
+                        --query 'Reservations[0].Instances[0].PublicIpAddress' \
+                        --output text)
+
 
                         if [ -z "$BASTION_IP" ] || [ "$BASTION_IP" = "None" ]; then
                             echo "ERROR: Running Bastion instance not found"
