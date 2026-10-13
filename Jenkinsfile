@@ -115,6 +115,11 @@ pipeline {
                           "${SSH_USER}@$BASTION_IP" \
                           "echo Bastion SSH successful"
 
+                        echo "===== Ansible SSH Configuration ====="
+                            ansible-inventory \
+                            -i ansible/inventory/aws_ec2.yml \
+                            --host i-01b3438d0b59c7bc4
+
                         echo "===== Testing SonarQube SSH via Bastion ====="
                         ansible \
                           -i ansible/inventory/aws_ec2.yml \
