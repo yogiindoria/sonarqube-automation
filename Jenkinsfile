@@ -62,6 +62,26 @@ pipeline {
             }
         }
 
+        stage('Ansible Credential Check') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'vm2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        echo "SSH credential loaded for ${SSH_USER}"
+                        echo "Ansible version:"
+                        ansible-playbook --version
+                        test -r "$SSH_KEY"
+                        echo "SSH private key is accessible to this build"
+                    '''
+                }
+            }
+        }
+
         // stage('Terraform Apply') {
         //     steps {
         //         withCredentials([[

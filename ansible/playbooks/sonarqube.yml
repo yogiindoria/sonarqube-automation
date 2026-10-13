@@ -1,0 +1,8 @@
+---
+- name: Configure SonarQube Server
+  hosts: role_sonarqube_server
+  become: true
+  gather_facts: true
+
+  roles:
+    - sonarqube

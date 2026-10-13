@@ -1,0 +1,21 @@
+---
+- name: Ensure SonarQube directory exists
+  ansible.builtin.file:
+    path: /opt/sonarqube
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy SonarQube Docker Compose configuration
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/sonarqube/docker-compose.yml
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Validate Docker Compose configuration
+  ansible.builtin.command:
+    cmd: docker compose -f /opt/sonarqube/docker-compose.yml config -q
+  changed_when: false

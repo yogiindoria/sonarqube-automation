@@ -1,0 +1,3 @@
+---
+ansible_ssh_common_args: >-
+  -o ProxyCommand="ssh -i ~/.ssh/VM2.pem -W %h:%p ubuntu@13.232.85.46"
