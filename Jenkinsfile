@@ -91,9 +91,7 @@ pipeline {
                         aws sts get-caller-identity
 
                         echo "===== Discovering EC2 Instances ====="
-                        ansible-inventory \
-                          -i ansible/inventory/aws_ec2.yml \
-                          --graph
+                        ansible-inventory -i ansible/inventory/aws_ec2.yml --graph
 
                         echo "===== Discovering Bastion IP ====="
                         BASTION_IP=$(aws ec2 describe-instances \
@@ -109,37 +107,32 @@ pipeline {
                             exit 1
                         fi
 
-                        echo "Bastion IP discovered successfully."
+                        echo "===== Starting ssh-agent ====="
+                        eval "$(ssh-agent -s)"
+                        trap 'ssh-agent -k >/dev/null 2>&1 || true' EXIT
+                        ssh-add "$SSH_KEY"
+
+                        SSH_ARGS="-o ProxyJump=${SSH_USER}@${BASTION_IP} -o StrictHostKeyChecking=accept-new"
 
                         echo "===== Testing Bastion SSH ====="
-                        ssh \
-                          -i "$SSH_KEY" \
-                          -o IdentitiesOnly=yes \
-                          -o BatchMode=yes \
-                          -o ConnectTimeout=10 \
-                          -o StrictHostKeyChecking=accept-new \
-                          "${SSH_USER}@$BASTION_IP" \
-                          "echo Bastion SSH successful"
+                        ssh -o BatchMode=yes -o ConnectTimeout=10 \
+                            -o StrictHostKeyChecking=accept-new \
+                            "${SSH_USER}@${BASTION_IP}" "echo Bastion SSH successful"
 
-                        
                         echo "===== Testing SonarQube SSH via Bastion ====="
-
                         ansible \
                             -i ansible/inventory/aws_ec2.yml \
                             role_sonarqube_server \
                             -m ping \
                             --user "$SSH_USER" \
-                            --private-key "$SSH_KEY" \
-                            --ssh-common-args="-o ProxyJump=${SSH_USER}@${BASTION_IP}"
+                            --ssh-common-args="$SSH_ARGS"
 
                         echo "===== Running SonarQube Playbook ====="
-
                         ansible-playbook \
                             -i ansible/inventory/aws_ec2.yml \
                             ansible/playbooks/sonarqube.yml \
                             --user "$SSH_USER" \
-                            --private-key "$SSH_KEY" \
-                            --ssh-common-args="-o ProxyJump=${SSH_USER}@${BASTION_IP}"
+                            --ssh-common-args="$SSH_ARGS"
 
                         echo "===== SonarQube Ansible Configuration Completed ====="
                     '''
