@@ -81,24 +81,49 @@ pipeline {
                         export ANSIBLE_ROLES_PATH="$WORKSPACE/ansible/roles"
                         export ANSIBLE_HOST_KEY_CHECKING=False
 
-                        echo "Checking AWS credentials..."
+                        echo "===== Checking AWS Credentials ====="
                         aws sts get-caller-identity
 
-                        echo "Discovering EC2 instances..."
+                        echo "===== Discovering EC2 Instances ====="
                         ansible-inventory \
                           -i ansible/inventory/aws_ec2.yml \
                           --graph
 
-                        echo "Testing SonarQube SSH connectivity..."
+                        echo "===== Discovering Bastion Public IP ====="
+                        BASTION_IP=$(aws ec2 describe-instances \
+                          --filters "Name=tag:Name,Values=sonarqube-bastion" \
+                                    "Name=instance-state-name,Values=running" \
+                          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+                          --output text)
+
+                        if [ -z "$BASTION_IP" ] || [ "$BASTION_IP" = "None" ]; then
+                            echo "ERROR: Running Bastion instance not found"
+                            exit 1
+                        fi
+
+                        echo "Bastion IP discovered dynamically: $BASTION_IP"
+
+                        echo "===== Testing Bastion SSH ====="
+                        ssh -vv \
+                          -i "$SSH_KEY" \
+                          -o BatchMode=yes \
+                          -o ConnectTimeout=10 \
+                          -o StrictHostKeyChecking=accept-new \
+                          "${SSH_USER}@$BASTION_IP" \
+                          "echo Bastion SSH successful"
+
+                        echo "===== Testing SonarQube SSH via Bastion ====="
                         ansible \
                           -i ansible/inventory/aws_ec2.yml \
                           role_sonarqube_server \
                           -m ping
 
-                        echo "Running SonarQube configuration playbook..."
+                        echo "===== Running SonarQube Ansible Playbook ====="
                         ansible-playbook \
                           -i ansible/inventory/aws_ec2.yml \
                           ansible/playbooks/sonarqube.yml
+
+                        echo "===== SonarQube Ansible Configuration Completed ====="
                     '''
                 }
             }
