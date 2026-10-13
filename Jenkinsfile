@@ -123,18 +123,23 @@ pipeline {
 
                         
                         echo "===== Testing SonarQube SSH via Bastion ====="
-                            ansible \
+
+                        ansible \
                             -i ansible/inventory/aws_ec2.yml \
                             role_sonarqube_server \
                             -m ping \
-                            -e "{\"ansible_user\":\"$SSH_USER\",\"ansible_ssh_private_key_file\":\"$SSH_KEY\",\"ansible_ssh_common_args\":\"-o ProxyJump=$SSH_USER@$BASTION_IP\"}"
+                            --user "$SSH_USER" \
+                            --private-key "$SSH_KEY" \
+                            --ssh-common-args="-o ProxyJump=${SSH_USER}@${BASTION_IP}"
 
                         echo "===== Running SonarQube Playbook ====="
-                            ansible-playbook \
+
+                        ansible-playbook \
                             -i ansible/inventory/aws_ec2.yml \
                             ansible/playbooks/sonarqube.yml \
-                            -e "{\"ansible_user\":\"$SSH_USER\",\"ansible_ssh_private_key_file\":\"$SSH_KEY\",\"ansible_ssh_common_args\":\"-o ProxyJump=$SSH_USER@$BASTION_IP\"}"
-
+                            --user "$SSH_USER" \
+                            --private-key "$SSH_KEY" \
+                            --ssh-common-args="-o ProxyJump=${SSH_USER}@${BASTION_IP}"
 
                         echo "===== SonarQube Ansible Configuration Completed ====="
                     '''
