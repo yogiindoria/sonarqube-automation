@@ -15,7 +15,7 @@ hostnames:
   - instance-id
 
 keyed_groups:
-  - key: tags.Name
+  - key: ec2_tags.Name
     prefix: role
     separator: "_"
 

@@ -62,21 +62,43 @@ pipeline {
             }
         }
 
-        stage('Ansible Credential Check') {
+        stage('Ansible Configure SonarQube') {
             steps {
                 withCredentials([
                     sshUserPrivateKey(
                         credentialsId: 'vm2-ssh-key',
                         keyFileVariable: 'SSH_KEY',
                         usernameVariable: 'SSH_USER'
-                    )
+                    ),
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-terraform'
+                    ]
                 ]) {
                     sh '''
-                        echo "SSH credential loaded for ${SSH_USER}"
-                        echo "Ansible version:"
-                        ansible-playbook --version
-                        test -r "$SSH_KEY"
-                        echo "SSH private key is accessible to this build"
+                        set -eu
+
+                        export ANSIBLE_ROLES_PATH="$WORKSPACE/ansible/roles"
+                        export ANSIBLE_HOST_KEY_CHECKING=False
+
+                        echo "Checking AWS credentials..."
+                        aws sts get-caller-identity
+
+                        echo "Discovering EC2 instances..."
+                        ansible-inventory \
+                          -i ansible/inventory/aws_ec2.yml \
+                          --graph
+
+                        echo "Testing SonarQube SSH connectivity..."
+                        ansible \
+                          -i ansible/inventory/aws_ec2.yml \
+                          role_sonarqube_server \
+                          -m ping
+
+                        echo "Running SonarQube configuration playbook..."
+                        ansible-playbook \
+                          -i ansible/inventory/aws_ec2.yml \
+                          ansible/playbooks/sonarqube.yml
                     '''
                 }
             }
