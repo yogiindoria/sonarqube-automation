@@ -29,8 +29,6 @@ resource "aws_instance" "sonarqube" {
   vpc_security_group_ids      = [aws_security_group.sonarqube.id]
   associate_public_ip_address = false
 
-  user_data = file("${path.module}/../scripts/install-sonarqube.sh")
-
   root_block_device {
     volume_size = 20
     volume_type = "gp3"

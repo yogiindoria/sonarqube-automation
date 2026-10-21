@@ -141,18 +141,18 @@ pipeline {
         }
 
         // Keep Terraform Apply disabled until explicitly required.
-        // stage('Terraform Apply') {
-        //     steps {
-        //         withCredentials([[
-        //             $class: 'AmazonWebServicesCredentialsBinding',
-        //             credentialsId: 'aws-terraform'
-        //         ]]) {
-        //             dir('terraform') {
-        //                 sh 'terraform apply -auto-approve'
-        //             }
-        //         }
-        //     }
-        // }
+        stage('Terraform Apply') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-terraform'
+                ]]) {
+                    dir('terraform') {
+                        sh 'terraform apply -auto-approve'
+                    }
+                }
+            }
+        }
 
     }
 }

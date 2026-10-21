@@ -1,4 +1,60 @@
 ---
+# ---------- Swap (2 GB) ----------
+- name: Create swap file
+  ansible.builtin.command: fallocate -l 2G /swapfile
+  args:
+    creates: /swapfile
+  register: swap_created
+
+- name: Set swap file permissions
+  ansible.builtin.file:
+    path: /swapfile
+    mode: "0600"
+
+- name: Format swap file
+  ansible.builtin.command: mkswap /swapfile
+  when: swap_created.changed
+
+- name: Enable swap
+  ansible.builtin.command: swapon /swapfile
+  when: swap_created.changed
+
+- name: Persist swap in fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: "/swapfile swap swap defaults 0 0"
+
+# ---------- Kernel settings for SonarQube ----------
+- name: Configure sysctl for SonarQube
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-sonarqube.conf
+    content: |
+      vm.max_map_count=524288
+      fs.file-max=131072
+    mode: "0644"
+  register: sysctl_conf
+
+- name: Apply sysctl settings
+  ansible.builtin.command: sysctl --system
+  when: sysctl_conf.changed
+
+# ---------- Docker ----------
+- name: Install Docker and Compose plugin
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose-v2
+    state: present
+    update_cache: true
+    lock_timeout: 120
+
+- name: Enable and start Docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+# ---------- SonarQube ----------
 - name: Ensure SonarQube directory exists
   ansible.builtin.file:
     path: /opt/sonarqube
@@ -19,3 +75,13 @@
   ansible.builtin.command:
     cmd: docker compose -f /opt/sonarqube/docker-compose.yml config -q
   changed_when: false
+
+- name: Start SonarQube stack
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: /opt/sonarqube
+  register: compose_up
+  changed_when: >-
+    'Created' in compose_up.stderr or
+    'Started' in compose_up.stderr or
+    'Recreated' in compose_up.stderr
