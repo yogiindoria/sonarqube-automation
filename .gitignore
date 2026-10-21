@@ -29,3 +29,5 @@ id_rsa.*
 
 # Logs
 *.log
+*.tfplan
+tfplan
