@@ -212,5 +212,26 @@ pipeline {
             }
         }
 
+        stage('Access Info') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-terraform'
+                ]]) {
+                    dir('terraform') {
+                        sh '''
+                            BASTION=$(terraform output -raw bastion_public_ip)
+                            PRIV=$(terraform output -raw sonarqube_private_ip)
+                            echo "================================================"
+                            echo "SonarQube is UP. To open it from your machine run:"
+                            echo "ssh -i ~/.ssh/VM2.pem -L 9000:${PRIV}:9000 ubuntu@${BASTION}"
+                            echo "Then open http://localhost:9000"
+                            echo "================================================"
+                        '''
+                    }
+                }
+            }
+        }
+
     }
 }

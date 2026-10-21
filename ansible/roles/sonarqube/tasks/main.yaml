@@ -86,3 +86,27 @@
     'Created' in compose_up.stderr or
     'Started' in compose_up.stderr or
     'Recreated' in compose_up.stderr
+- name: Wait until SonarQube reports UP
+  ansible.builtin.uri:
+    url: http://localhost:9000/api/system/status
+    return_content: true
+  register: sonar_status
+  until: sonar_status.json is defined and sonar_status.json.status == 'UP'
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Get running compose services
+  ansible.builtin.command:
+    cmd: docker compose ps --status running --services
+    chdir: /opt/sonarqube
+  register: running_services
+  changed_when: false
+
+- name: Assert both containers are running
+  ansible.builtin.assert:
+    that:
+      - "'db' in running_services.stdout_lines"
+      - "'sonarqube' in running_services.stdout_lines"
+    fail_msg: "db ya sonarqube container running nahi hai"
+    success_msg: "db aur sonarqube dono running hain"
