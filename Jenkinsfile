@@ -1,12 +1,39 @@
-
 pipeline {
     agent any
+
+    parameters {
+        string(
+            name: 'ALLOWED_SSH_CIDR',
+            defaultValue: '',
+            description: 'Optional. Public IP in CIDR format, e.g. 203.0.113.10/32. Leave blank to auto-detect the Jenkins machine public IP.'
+        )
+    }
 
     stages {
 
         stage('Checkout') {
             steps {
                 echo 'Source code checked out by Jenkins SCM'
+            }
+        }
+
+        stage('Resolve SSH CIDR') {
+            steps {
+                script {
+                    def cidr = (params.ALLOWED_SSH_CIDR ?: '').trim()
+                    if (!cidr) {
+                        def ip = sh(
+                            script: 'curl -4 -s --max-time 10 https://checkip.amazonaws.com',
+                            returnStdout: true
+                        ).trim()
+                        cidr = "${ip}/32".toString()
+                        echo "Auto-detected public IP: ${cidr}"
+                    }
+                    if (!(cidr ==~ '^\\d{1,3}(\\.\\d{1,3}){3}/32$')) {
+                        error("Invalid CIDR '${cidr}'. It must look like 203.0.113.10/32")
+                    }
+                    env.SSH_CIDR = cidr
+                }
             }
         }
 
@@ -44,7 +71,7 @@ pipeline {
                 ]]) {
                     dir('terraform') {
                         sh 'terraform workspace show'
-                        sh 'terraform state list'
+                        sh 'terraform state list || true'
                     }
                 }
             }
@@ -60,8 +87,30 @@ pipeline {
                         sh '''
                             terraform plan \
                               -input=false \
-                              -var="allowed_ssh_cidr=103.226.200.68/32"
+                              -var="allowed_ssh_cidr=$SSH_CIDR" \
+                              -out=tfplan
                         '''
+                    }
+                }
+            }
+        }
+
+        stage('Approval') {
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input message: 'Plan check kar liya? Terraform Apply karna hai?', ok: 'Apply'
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-terraform'
+                ]]) {
+                    dir('terraform') {
+                        sh 'terraform apply -input=false tfplan'
                     }
                 }
             }
@@ -75,6 +124,10 @@ pipeline {
                         keyFileVariable: 'SSH_KEY',
                         usernameVariable: 'SSH_USER'
                     ),
+                    file(
+                        credentialsId: 'ansible-vault-pass',
+                        variable: 'VAULT_PASS_FILE'
+                    ),
                     [
                         $class: 'AmazonWebServicesCredentialsBinding',
                         credentialsId: 'aws-terraform'
@@ -86,6 +139,7 @@ pipeline {
                         export AWS_DEFAULT_REGION=ap-south-1
                         export ANSIBLE_ROLES_PATH="$WORKSPACE/ansible/roles"
                         export ANSIBLE_HOST_KEY_CHECKING=False
+                        export ANSIBLE_VAULT_PASSWORD_FILE="$VAULT_PASS_FILE"
 
                         echo "===== Checking AWS Credentials ====="
                         aws sts get-caller-identity
@@ -114,18 +168,36 @@ pipeline {
 
                         SSH_ARGS="-o ProxyJump=${SSH_USER}@${BASTION_IP} -o StrictHostKeyChecking=accept-new"
 
-                        echo "===== Testing Bastion SSH ====="
-                        ssh -o BatchMode=yes -o ConnectTimeout=10 \
-                            -o StrictHostKeyChecking=accept-new \
-                            "${SSH_USER}@${BASTION_IP}" "echo Bastion SSH successful"
+                        echo "===== Testing Bastion SSH (waits for fresh instance) ====="
+                        OK=0
+                        for i in $(seq 1 20); do
+                            if ssh -o BatchMode=yes -o ConnectTimeout=10 \
+                                -o StrictHostKeyChecking=accept-new \
+                                "${SSH_USER}@${BASTION_IP}" "echo Bastion SSH successful"; then
+                                OK=1
+                                break
+                            fi
+                            echo "Bastion not ready yet (attempt $i/20), retrying in 15s..."
+                            sleep 15
+                        done
+                        [ "$OK" = "1" ] || { echo "ERROR: Bastion SSH never became reachable"; exit 1; }
 
                         echo "===== Testing SonarQube SSH via Bastion ====="
-                        ansible \
-                            -i ansible/inventory/aws_ec2.yml \
-                            role_sonarqube_server \
-                            -m ping \
-                            --user "$SSH_USER" \
-                            --ssh-common-args="$SSH_ARGS"
+                        OK=0
+                        for i in $(seq 1 20); do
+                            if ansible \
+                                -i ansible/inventory/aws_ec2.yml \
+                                role_sonarqube_server \
+                                -m ping \
+                                --user "$SSH_USER" \
+                                --ssh-common-args="$SSH_ARGS"; then
+                                OK=1
+                                break
+                            fi
+                            echo "SonarQube server not ready yet (attempt $i/20), retrying in 15s..."
+                            sleep 15
+                        done
+                        [ "$OK" = "1" ] || { echo "ERROR: SonarQube server never became reachable"; exit 1; }
 
                         echo "===== Running SonarQube Playbook ====="
                         ansible-playbook \
@@ -136,20 +208,6 @@ pipeline {
 
                         echo "===== SonarQube Ansible Configuration Completed ====="
                     '''
-                }
-            }
-        }
-
-        // Keep Terraform Apply disabled until explicitly required.
-        stage('Terraform Apply') {
-            steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform'
-                ]]) {
-                    dir('terraform') {
-                        sh 'terraform apply -auto-approve'
-                    }
                 }
             }
         }

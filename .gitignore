@@ -31,3 +31,5 @@ id_rsa.*
 *.log
 *.tfplan
 tfplan
+.vault_pass*
+.vault_pass*
