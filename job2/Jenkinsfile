@@ -417,6 +417,9 @@ PY
 
     post {
         success {
+            script {
+                currentBuild.description = "<a href='http://localhost:9000/dashboard?id=${env.SONAR_PROJECT_KEY}'>Open in SonarQube</a>"
+            }
             echo "Pipeline and Quality Gate passed for: ${env.SONAR_PROJECT_KEY}"
         }
         failure {
