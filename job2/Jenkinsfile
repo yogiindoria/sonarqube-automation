@@ -1,0 +1,438 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(
+            name: 'REPO_URL',
+            defaultValue: 'https://github.com/spring-projects/spring-petclinic.git',
+            description: 'GitHub repository URL (Maven projects)'
+        )
+        string(
+            name: 'BRANCH',
+            defaultValue: 'main',
+            description: 'Git branch to analyze'
+        )
+    }
+
+    tools {
+        jdk 'JDK-21'
+        maven 'Maven-3'
+    }
+
+    environment {
+        SONAR_CONFIG = 'SonarQube-Server'
+    }
+
+    stages {
+
+        stage('Open SonarQube Tunnel') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'vm2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    ),
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-terraform'
+                    ]
+                ]) {
+                    sh '''
+                        set -eu
+
+                        export AWS_DEFAULT_REGION=ap-south-1
+                        # Keep the tunnel alive for the next stages of this build
+                        export JENKINS_NODE_COOKIE=dontKillMe
+                        export BUILD_ID=dontKillMe
+
+                        PID_FILE=/tmp/sonarqube-tunnel-job2.pid
+                        LOG_FILE=/tmp/sonarqube-tunnel-job2.log
+
+                        # Stop any leftover tunnel from an earlier run
+                        if [ -f "$PID_FILE" ]; then
+                            kill "$(cat "$PID_FILE")" 2>/dev/null || true
+                            rm -f "$PID_FILE"
+                            sleep 1
+                        fi
+
+                        echo "===== Discovering infra from AWS ====="
+                        BASTION_IP=$(aws ec2 describe-instances \
+                          --filters "Name=tag:Name,Values=sonarqube-bastion" \
+                                    "Name=instance-state-name,Values=running" \
+                          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+                          --output text)
+
+                        SONAR_IP=$(aws ec2 describe-instances \
+                          --filters "Name=tag:Name,Values=sonarqube-server" \
+                                    "Name=instance-state-name,Values=running" \
+                          --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+                          --output text)
+
+                        if [ -z "$BASTION_IP" ] || [ "$BASTION_IP" = "None" ] || \
+                           [ -z "$SONAR_IP" ] || [ "$SONAR_IP" = "None" ]; then
+                            echo "ERROR: SonarQube infra is not running. Run the infrastructure pipeline first."
+                            exit 1
+                        fi
+                        echo "Bastion: $BASTION_IP  SonarQube: $SONAR_IP"
+
+                        echo "===== Opening SSH tunnel (localhost:19000 -> SonarQube:9000) ====="
+                        nohup setsid ssh -N \
+                            -o ExitOnForwardFailure=yes \
+                            -o ServerAliveInterval=30 \
+                            -o ServerAliveCountMax=3 \
+                            -o BatchMode=yes \
+                            -o StrictHostKeyChecking=accept-new \
+                            -i "$SSH_KEY" \
+                            -L 19000:${SONAR_IP}:9000 \
+                            "${SSH_USER}@${BASTION_IP}" > "$LOG_FILE" 2>&1 &
+                        echo $! > "$PID_FILE"
+                        sleep 3
+
+                        if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+                            echo "ERROR: tunnel failed to start. Log:"
+                            cat "$LOG_FILE"
+                            echo "Hints: port 19000 may be in use (stop the old tunnel service),"
+                            echo "or your public IP changed (re-run the infrastructure pipeline)."
+                            exit 1
+                        fi
+
+                        echo "===== Waiting for SonarQube API ====="
+                        READY=0
+                        for attempt in $(seq 1 60); do
+                            if curl -fsS --max-time 5 \
+                                http://localhost:19000/api/system/status \
+                                -o /tmp/sonarqube-status.json; then
+
+                                if grep -q '"status":"UP"' /tmp/sonarqube-status.json; then
+                                    echo "SonarQube is UP."
+                                    READY=1
+                                    break
+                                fi
+                            fi
+
+                            echo "Attempt ${attempt}/60: SonarQube is not ready yet."
+                            sleep 5
+                        done
+
+                        rm -f /tmp/sonarqube-status.json
+
+                        if [ "$READY" -ne 1 ]; then
+                            echo "ERROR: SonarQube did not become UP within 5 minutes."
+                            cat "$LOG_FILE" || true
+                            exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Prepare Project Key') {
+            steps {
+                script {
+                    def repo = params.REPO_URL
+                        .trim()
+                        .replaceAll('/+$', '')
+                        .tokenize('/')
+                        .last()
+                        .replaceFirst(/(?i)\.git$/, '')
+
+                    if (!repo) {
+                        error 'Could not derive a project name from REPO_URL.'
+                    }
+
+                    env.SONAR_PROJECT_NAME = repo
+                    env.SONAR_PROJECT_KEY = repo.toLowerCase()
+                        .replaceAll(/[^a-z0-9_-]/, '-')
+
+                    echo "SonarQube project key: ${env.SONAR_PROJECT_KEY}"
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                deleteDir()
+                git branch: "${params.BRANCH}",
+                    url: "${params.REPO_URL}"
+            }
+        }
+
+        stage('Validate Provisioning Token') {
+            steps {
+                withSonarQubeEnv("${SONAR_CONFIG}") {
+                    withCredentials([
+                        string(
+                            credentialsId: 'sonar-project-provisioning-token',
+                            variable: 'SONAR_PROVISION_TOKEN'
+                        )
+                    ]) {
+                        sh '''
+                            set -eu
+                            set +x
+
+                            curl -fsS \
+                              -H "Authorization: Bearer $SONAR_PROVISION_TOKEN" \
+                              "$SONAR_HOST_URL/api/authentication/validate" \
+                              | python3 -c '
+import json, sys
+if json.load(sys.stdin).get("valid") is not True:
+    print("Provisioning token is invalid.")
+    sys.exit(1)
+print("Provisioning token is valid.")
+'
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Create Project If Missing') {
+            steps {
+                withSonarQubeEnv("${SONAR_CONFIG}") {
+                    withCredentials([
+                        string(
+                            credentialsId: 'sonar-project-provisioning-token',
+                            variable: 'SONAR_PROVISION_TOKEN'
+                        )
+                    ]) {
+                        sh '''
+                            set -eu
+                            set +x
+
+                            BODY=$(mktemp)
+                            trap 'rm -f "$BODY"' EXIT
+
+                            STATUS=$(curl -sS \
+                              -o "$BODY" \
+                              -w '%{http_code}' \
+                              -X POST \
+                              -H "Authorization: Bearer $SONAR_PROVISION_TOKEN" \
+                              --data-urlencode "project=$SONAR_PROJECT_KEY" \
+                              --data-urlencode "name=$SONAR_PROJECT_NAME" \
+                              "$SONAR_HOST_URL/api/projects/create")
+
+                            if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 300 ]; then
+                                echo "SonarQube project created."
+                            else
+                                if python3 - "$BODY" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+
+messages = [
+    str(e.get("msg", "")).lower()
+    for e in data.get("errors", [])
+]
+
+duplicate = any(
+    ("already exists" in m or "already been taken" in m)
+    and ("project" in m or "key" in m)
+    for m in messages
+)
+sys.exit(0 if duplicate else 1)
+PY
+                                then
+                                    echo "Project already exists; reusing it."
+                                else
+                                    echo "Project creation failed (HTTP $STATUS):"
+                                    cat "$BODY"
+                                    echo
+                                    exit 1
+                                fi
+                            fi
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Build and Test') {
+            steps {
+                sh 'java -version'
+                sh 'mvn -version'
+                sh 'mvn clean verify'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONAR_CONFIG}") {
+                    withCredentials([
+                        string(
+                            credentialsId: 'sonar-global-analysis-token',
+                            variable: 'SONAR_TOKEN'
+                        )
+                    ]) {
+                        sh '''
+                            set -eu
+                            set +x
+
+                            mvn org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+                              -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+                              -Dsonar.projectName="$SONAR_PROJECT_NAME" \
+                              -Dsonar.token="$SONAR_TOKEN" \
+                              -Dsonar.scanner.metadataFilePath="$WORKSPACE/sonar-report-task.txt"
+
+                            if [ ! -s "$WORKSPACE/sonar-report-task.txt" ]; then
+                                echo "ERROR: SonarScanner did not create its report-task metadata."
+                                echo "Inspect the Maven scanner output above."
+                                exit 1
+                            fi
+
+                            echo "SonarScanner report metadata created successfully."
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate - API Polling') {
+            steps {
+                withSonarQubeEnv("${SONAR_CONFIG}") {
+                    withCredentials([
+                        string(
+                            credentialsId: 'sonar-global-analysis-token',
+                            variable: 'SONAR_TOKEN'
+                        )
+                    ]) {
+                        sh '''
+                            set -eu
+                            set +x
+
+                            python3 - <<'PY'
+import json
+import os
+import sys
+import time
+import urllib.parse
+import urllib.request
+import urllib.error
+
+base_url = os.environ["SONAR_HOST_URL"].rstrip("/")
+token = os.environ["SONAR_TOKEN"]
+project_key = os.environ["SONAR_PROJECT_KEY"]
+report_file = os.path.join(
+    os.environ["WORKSPACE"],
+    "sonar-report-task.txt"
+)
+
+if not os.path.isfile(report_file):
+    print("ERROR: SonarScanner report metadata is missing.")
+    sys.exit(1)
+
+properties = {}
+with open(report_file, encoding="utf-8") as report:
+    for line in report:
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            properties[key.strip()] = value.strip()
+
+task_id = properties.get("ceTaskId")
+if not task_id:
+    print("ERROR: ceTaskId is missing from scanner metadata.")
+    sys.exit(1)
+
+def api_get(path, params):
+    query = urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        f"{base_url}{path}?{query}",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        print(f"SonarQube API request failed: HTTP {exc.code}")
+        raise
+
+print(f"Waiting for analysis task: {task_id}")
+deadline = time.monotonic() + 600
+
+while time.monotonic() < deadline:
+    data = api_get("/api/ce/task", {"id": task_id})
+    task = data.get("task", {})
+    status = task.get("status")
+
+    if status == "SUCCESS":
+        analysis_id = task.get("analysisId")
+        if not analysis_id:
+            print("ERROR: Analysis ID missing.")
+            sys.exit(1)
+        break
+
+    if status in ("FAILED", "CANCELED"):
+        print(f"Compute Engine task status: {status}")
+        if task.get("errorMessage"):
+            print(task["errorMessage"])
+        sys.exit(1)
+
+    print(f"Analysis status: {status or 'UNKNOWN'}")
+    time.sleep(5)
+else:
+    print("ERROR: Timed out waiting for analysis.")
+    sys.exit(1)
+
+print("Checking Quality Gate...")
+result = api_get(
+    "/api/qualitygates/project_status",
+    {"analysisId": analysis_id}
+)
+
+gate = result.get("projectStatus", {})
+gate_status = gate.get("status", "UNKNOWN")
+
+print(f"Project: {project_key}")
+print(f"Quality Gate status: {gate_status}")
+
+if gate_status != "OK":
+    for condition in gate.get("conditions", []):
+        print(
+            f"{condition.get('metricKey')}: "
+            f"status={condition.get('status')}, "
+            f"actual={condition.get('actualValue')}, "
+            f"threshold={condition.get('errorThreshold')}"
+        )
+    print("ERROR: Quality Gate did not pass.")
+    sys.exit(1)
+
+print("SUCCESS: Quality Gate passed.")
+PY
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Pipeline and Quality Gate passed for: ${env.SONAR_PROJECT_KEY}"
+        }
+        failure {
+            echo 'Pipeline failed. Check Console Output for the exact failing stage.'
+        }
+        always {
+            sh '''
+                PID_FILE=/tmp/sonarqube-tunnel-job2.pid
+                if [ -f "$PID_FILE" ]; then
+                    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+                    rm -f "$PID_FILE"
+                    echo "SonarQube tunnel closed."
+                fi
+            '''
+            echo 'Pipeline execution finished.'
+        }
+    }
+}
+
