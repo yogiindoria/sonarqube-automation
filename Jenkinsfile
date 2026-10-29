@@ -2,6 +2,11 @@ pipeline {
     agent any
 
     parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['apply', 'destroy'],
+            description: 'apply = build or update the infra and configure SonarQube. destroy = delete the whole infra (SonarQube data is lost).'
+        )
         string(
             name: 'ALLOWED_SSH_CIDR',
             defaultValue: '',
@@ -33,6 +38,9 @@ pipeline {
                         error("Invalid CIDR '${cidr}'. It must look like 203.0.113.10/32")
                     }
                     env.SSH_CIDR = cidr
+                    env.ACTION_MODE = (params.ACTION ?: 'apply')
+                    env.PLAN_FLAG = (env.ACTION_MODE == 'destroy') ? '-destroy' : ''
+                    echo "Action selected: ${env.ACTION_MODE}"
                 }
             }
         }
@@ -77,6 +85,34 @@ pipeline {
             }
         }
 
+        stage('Start Stopped Instances') {
+            when { environment name: 'ACTION_MODE', value: 'apply' }
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-terraform'
+                ]]) {
+                    sh '''
+                        set -eu
+                        export AWS_DEFAULT_REGION=ap-south-1
+
+                        IDS=$(aws ec2 describe-instances \
+                          --filters "Name=tag:Name,Values=sonarqube-bastion,sonarqube-server" \
+                                    "Name=instance-state-name,Values=stopped" \
+                          --query 'Reservations[].Instances[].InstanceId' --output text)
+
+                        if [ -n "$IDS" ]; then
+                            echo "Starting stopped instances: $IDS"
+                            aws ec2 start-instances --instance-ids $IDS >/dev/null
+                            aws ec2 wait instance-status-ok --instance-ids $IDS
+                        else
+                            echo "No stopped instances."
+                        fi
+                    '''
+                }
+            }
+        }
+
         stage('Terraform Plan') {
             steps {
                 withCredentials([[
@@ -85,7 +121,7 @@ pipeline {
                 ]]) {
                     dir('terraform') {
                         sh '''
-                            terraform plan \
+                            terraform plan $PLAN_FLAG \
                               -input=false \
                               -var="allowed_ssh_cidr=$SSH_CIDR" \
                               -out=tfplan
@@ -98,12 +134,47 @@ pipeline {
         stage('Approval') {
             steps {
                 timeout(time: 15, unit: 'MINUTES') {
-                    input message: 'Plan check kar liya? Terraform Apply karna hai?', ok: 'Apply'
+                    script {
+                        if (env.ACTION_MODE == 'destroy') {
+                            def answer = input(
+                                message: 'DESTROY plan check kar liya? Poora infra aur SonarQube data delete ho jayega.',
+                                ok: 'Destroy',
+                                parameters: [
+                                    string(
+                                        name: 'CONFIRM',
+                                        defaultValue: '',
+                                        description: 'Type DESTROY to confirm'
+                                    )
+                                ]
+                            )
+                            if (answer != 'DESTROY') {
+                                error('Destroy not confirmed. Type DESTROY exactly.')
+                            }
+                        } else {
+                            input message: 'Plan check kar liya? Terraform Apply karna hai?', ok: 'Apply'
+                        }
+                    }
                 }
             }
         }
 
-        stage('Terraform Apply') {
+        stage('Close UI Tunnel') {
+            when { environment name: 'ACTION_MODE', value: 'destroy' }
+            steps {
+                sh '''
+                    PID_FILE=/tmp/sonarqube-ui-tunnel.pid
+                    if [ -f "$PID_FILE" ]; then
+                        kill "$(cat "$PID_FILE")" 2>/dev/null || true
+                        rm -f "$PID_FILE"
+                        echo "SonarQube UI tunnel closed."
+                    else
+                        echo "No UI tunnel running."
+                    fi
+                '''
+            }
+        }
+
+        stage('Terraform Apply / Destroy') {
             steps {
                 withCredentials([[
                     $class: 'AmazonWebServicesCredentialsBinding',
@@ -117,6 +188,7 @@ pipeline {
         }
 
         stage('Ansible Configure SonarQube') {
+            when { environment name: 'ACTION_MODE', value: 'apply' }
             steps {
                 withCredentials([
                     sshUserPrivateKey(
@@ -146,6 +218,13 @@ pipeline {
 
                         echo "===== Discovering EC2 Instances ====="
                         ansible-inventory -i ansible/inventory/aws_ec2.yml --graph
+
+                        echo "===== Verifying SonarQube server is in inventory ====="
+                        HOSTS_OUT=$(ansible -i ansible/inventory/aws_ec2.yml role_sonarqube_server --list-hosts 2>/dev/null || true)
+                        if ! echo "$HOSTS_OUT" | grep -q 'hosts (1)'; then
+                            echo "ERROR: SonarQube server not found in inventory (is the instance stopped?)"
+                            exit 1
+                        fi
 
                         echo "===== Discovering Bastion IP ====="
                         BASTION_IP=$(aws ec2 describe-instances \
@@ -213,6 +292,7 @@ pipeline {
         }
 
         stage('SonarQube Bootstrap') {
+            when { environment name: 'ACTION_MODE', value: 'apply' }
             steps {
                 withCredentials([
                     sshUserPrivateKey(
@@ -341,26 +421,94 @@ EOF
             }
         }
 
-        stage('Access Info') {
+        stage('Open SonarQube UI') {
+            when { environment name: 'ACTION_MODE', value: 'apply' }
             steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-terraform'
-                ]]) {
-                    dir('terraform') {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                    withCredentials([
+                        sshUserPrivateKey(
+                            credentialsId: 'vm2-ssh-key',
+                            keyFileVariable: 'SSH_KEY',
+                            usernameVariable: 'SSH_USER'
+                        ),
+                        [
+                            $class: 'AmazonWebServicesCredentialsBinding',
+                            credentialsId: 'aws-terraform'
+                        ]
+                    ]) {
                         sh '''
-                            BASTION=$(terraform output -raw bastion_public_ip)
-                            PRIV=$(terraform output -raw sonarqube_private_ip)
+                            set -eu
+
+                            export AWS_DEFAULT_REGION=ap-south-1
+                            # Keep this tunnel alive after the build finishes
+                            export JENKINS_NODE_COOKIE=dontKillMe
+                            export BUILD_ID=dontKillMe
+
+                            PID_FILE=/tmp/sonarqube-ui-tunnel.pid
+                            LOG_FILE=/tmp/sonarqube-ui-tunnel.log
+
+                            # Close an older UI tunnel (it may point to a destroyed server)
+                            if [ -f "$PID_FILE" ]; then
+                                kill "$(cat "$PID_FILE")" 2>/dev/null || true
+                                rm -f "$PID_FILE"
+                                sleep 1
+                            fi
+
+                            BASTION=$(cd terraform && terraform output -raw bastion_public_ip)
+                            PRIV=$(cd terraform && terraform output -raw sonarqube_private_ip)
+
+                            echo "===== Opening UI tunnel (localhost:9000 -> SonarQube:9000) ====="
+                            nohup setsid ssh -N \
+                                -o ExitOnForwardFailure=yes \
+                                -o ServerAliveInterval=30 \
+                                -o ServerAliveCountMax=3 \
+                                -o BatchMode=yes \
+                                -o StrictHostKeyChecking=accept-new \
+                                -i "$SSH_KEY" \
+                                -L 9000:${PRIV}:9000 \
+                                "${SSH_USER}@${BASTION}" > "$LOG_FILE" 2>&1 &
+                            echo $! > "$PID_FILE"
+                            sleep 3
+
+                            if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+                                echo "ERROR: UI tunnel failed to start (is port 9000 already in use?). Log:"
+                                cat "$LOG_FILE"
+                                exit 1
+                            fi
+
+                            READY=0
+                            for i in $(seq 1 30); do
+                                if curl -fsS --max-time 5 http://localhost:9000/api/system/status 2>/dev/null | grep -q '"status":"UP"'; then
+                                    READY=1
+                                    break
+                                fi
+                                echo "Attempt $i/30: SonarQube UI not ready yet"
+                                sleep 5
+                            done
+                            [ "$READY" = "1" ] || { echo "ERROR: SonarQube UI did not become UP via tunnel"; exit 1; }
+
                             echo "================================================"
-                            echo "SonarQube is UP. To open it from your machine run:"
-                            echo "ssh -i ~/.ssh/VM2.pem -L 9000:${PRIV}:9000 ubuntu@${BASTION}"
-                            echo "Then open http://localhost:9000"
+                            echo "SonarQube is UP: http://localhost:9000"
+                            echo "Login: admin / (password from credential sonar-admin-password)"
                             echo "================================================"
                         '''
+                    }
+                    script {
+                        currentBuild.description = "<a href='http://localhost:9000'>Open SonarQube (localhost:9000)</a>"
                     }
                 }
             }
         }
 
+    }
+
+    post {
+        success {
+            script {
+                if (env.ACTION_MODE == 'destroy') {
+                    currentBuild.description = 'Infra destroyed'
+                }
+            }
+        }
     }
 }
