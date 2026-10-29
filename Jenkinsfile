@@ -136,24 +136,7 @@ pipeline {
                 timeout(time: 15, unit: 'MINUTES') {
                     script {
                         if (env.ACTION_MODE == 'destroy') {
-                            def answer = input(
-                                message: 'DESTROY plan check kar liya? Poora infra aur SonarQube data delete ho jayega.',
-                                ok: 'Destroy',
-                                parameters: [
-                                    string(
-                                        name: 'CONFIRM',
-                                        defaultValue: '',
-                                        description: 'Type DESTROY to confirm'
-                                    )
-                                ]
-                            )
-                            def typed = (answer instanceof Map ? answer.CONFIRM : answer)
-                            typed = (typed ?: '').toString().trim()
-                            echo "Confirmation received: '${typed}'"
-                            if (typed != 'DESTROY') {
-                                currentBuild.result = 'ABORTED'
-                                error('Destroy not confirmed. Type DESTROY exactly.')
-                            }
+                            input message: 'DESTROY plan check kar liya? Poora infra aur SonarQube data delete ho jayega.', ok: 'Destroy'
                         } else {
                             input message: 'Plan check kar liya? Terraform Apply karna hai?', ok: 'Apply'
                         }
