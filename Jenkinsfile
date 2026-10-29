@@ -147,7 +147,11 @@ pipeline {
                                     )
                                 ]
                             )
-                            if (answer != 'DESTROY') {
+                            def typed = (answer instanceof Map ? answer.CONFIRM : answer)
+                            typed = (typed ?: '').toString().trim()
+                            echo "Confirmation received: '${typed}'"
+                            if (typed != 'DESTROY') {
+                                currentBuild.result = 'ABORTED'
                                 error('Destroy not confirmed. Type DESTROY exactly.')
                             }
                         } else {
